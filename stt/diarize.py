@@ -1,6 +1,10 @@
 import logging
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import torch
+import numpy as np
+from io import BytesIO
+import soundfile as sf
 
 logger = logging.getLogger("vad_transcriber")
 
@@ -14,24 +18,63 @@ def _import_pyannote():
         return None
 
 
-def diarize_file(file_path: str) -> List[Dict[str, Any]]:
+# --- NEW: Global variable to hold the loaded pipeline ---
+_LOADED_PIPELINE = None
+
+def get_or_load_pipeline() -> Optional[Any]:
     """
-    Run speaker diarization on a media file using pyannote.audio, if available.
-    Requires env HUGGINGFACE_TOKEN for the pretrained pipeline.
-    Returns a list of dicts: {start: float, end: float, speaker: str}
+    Returns a loaded pyannote pipeline, loading it once if not already loaded.
+    Returns None if loading fails or token is not set.
     """
+    global _LOADED_PIPELINE
+
+    if _LOADED_PIPELINE is not None:
+        return _LOADED_PIPELINE
+
     Pipeline = _import_pyannote()
     if Pipeline is None:
-        return []
+        return None
 
     token = os.getenv("HUGGINGFACE_TOKEN", "")
     if not token:
-        logger.warning("HUGGINGFACE_TOKEN not set; skipping diarization")
-        return []
+        logger.warning("HUGGINGFACE_TOKEN not set; cannot load diarization pipeline")
+        return None
 
     try:
+        logger.info("Loading pyannote/speaker-diarization pipeline...")
         pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization@2.1", use_auth_token=token)
-        diarization = pipeline(file_path)
+        _LOADED_PIPELINE = pipeline
+        logger.info("Diarization pipeline loaded successfully.")
+        return pipeline
+    except Exception as e:
+        logger.exception(f"Failed to load diarization pipeline: {e}")
+        return None
+
+
+def diarize_audio_data(
+    audio_data: np.ndarray,
+    sample_rate: int,
+    pipeline: Optional[Any] = None
+) -> List[Dict[str, Any]]:
+    """
+    Run speaker diarization on a numpy audio array.
+    `audio_data` should be a 1D numpy array of float32 samples.
+    If `pipeline` is None, it will try to load/get the global one.
+    """
+    if pipeline is None:
+        pipeline = get_or_load_pipeline()
+        if pipeline is None:
+            return []
+
+    try:
+        # Create an in-memory WAV file from the numpy array
+        buffer = BytesIO()
+        # pyannote expects int16, so we scale the float32 [-1, 1] data
+        sf.write(buffer, (audio_data * 32767).astype(np.int16), sample_rate, format='WAV', subtype='PCM_16')
+        buffer.seek(0)
+
+        # Run diarization
+        diarization = pipeline(buffer)
         results: List[Dict[str, Any]] = []
         for turn, _, speaker in diarization.itertracks(yield_label=True):
             results.append({
@@ -41,7 +84,7 @@ def diarize_file(file_path: str) -> List[Dict[str, Any]]:
             })
         return results
     except Exception as e:
-        logger.exception(f"Diarization failed: {e}")
+        logger.debug(f"Diarization on audio data failed: {e}")
         return []
 
 
@@ -76,5 +119,3 @@ def assign_speakers(whisper_segments, diar_segments: List[Dict[str, Any]]):
             except Exception:
                 pass
     return whisper_segments
-
-

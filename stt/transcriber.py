@@ -1,4 +1,5 @@
 import logging
+import os
 import queue
 import threading
 import time
@@ -23,8 +24,7 @@ from .config import (
 from .audio import concat_and_maybe_empty, load_audio_file
 from .vad import load_vad_model, run_vad, cap_ts_bounds
 from .model import load_model_safe, transcribe_chunk
-from .diarize import diarize_file, assign_speakers
-
+from .diarize import get_or_load_pipeline, diarize_audio_data, assign_speakers
 
 logger = logging.getLogger("vad_transcriber")
 
@@ -159,13 +159,30 @@ class VADTranscriber:
                 )
                 for s in segments:
                     segs.append(s)
+
             # Diarization (optional, if token available & package installed)
-            diar = diarize_file(file_path)
+            diar = []  # Default: no diarization
+            try:
+                from .diarize import get_or_load_pipeline, diarize_audio_data
+                # Load the pipeline (it will be cached for future use)
+                diar_pipeline = get_or_load_pipeline()
+                if diar_pipeline is not None:
+                    # Load the entire audio file into memory for diarization
+                    full_audio = load_audio_file(file_path, SAMPLE_RATE)
+                    # Run diarization on the full audio
+                    diar = diarize_audio_data(full_audio, SAMPLE_RATE, pipeline=diar_pipeline)
+            except Exception as e:
+                logger.debug(f"Full-file diarization failed: {e}")
+
+            # Assign speaker labels if diarization was successful
             if diar:
                 assign_speakers(segs, diar)
+
+            # Output the results
             if not segs:
                 logger.info("No speech detected in file.")
                 return
+
             for s in segs:
                 text = s.text.strip()
                 if not text:
@@ -175,32 +192,26 @@ class VADTranscriber:
                     logger.info(f"[File][{spk}] {text}")
                 else:
                     logger.info(f"[File] {text}")
+
         except Exception as e:
             logger.exception(f"File transcription error: {e}")
-
+            
     def run_file_streaming(self, file_path: str):
         """Stream-like processing of a file: VAD-segment, transcribe immediately.
-        Diarization (if available) runs in background; segments are labeled when ready."""
+        Diarization runs on EACH CHUNK individually for immediate speaker labeling.
+        Uses a globally cached pipeline for efficiency.
+        """
         try:
             logger.info(f"Processing (streaming) file: {file_path}")
             audio = load_audio_file(file_path, SAMPLE_RATE)
 
-            # Start diarization in background (non-blocking)
-            diar_results = {"ready": False, "segments": []}
+            # Get the diarization pipeline once (it will be cached globally)
+            # If this fails, diarization will be skipped for all chunks.
+            diar_pipeline = None
+            if os.getenv("HUGGINGFACE_TOKEN"):
+                diar_pipeline = get_or_load_pipeline()
 
-            def _run_diarization():
-                ds = diarize_file(file_path)
-                diar_results["segments"] = ds or []
-                diar_results["ready"] = True
-                if ds:
-                    logger.info(f"Diarization ready: {len(ds)} speaker turns")
-                else:
-                    logger.info("Diarization not available or returned no turns")
-
-            diar_thread = threading.Thread(target=_run_diarization, daemon=False)
-            diar_thread.start()
-
-            # VAD segmentation
+            # VAD segmentation for the entire file
             timestamps = run_vad(
                 audio,
                 self.vad_model,
@@ -221,6 +232,8 @@ class VADTranscriber:
                 if end_i - start_i < int(SAMPLE_RATE * 0.5):
                     continue
                 chunk = audio[start_i:end_i]
+
+                # Transcribe the chunk
                 segs = transcribe_chunk(
                     self.model,
                     chunk,
@@ -228,17 +241,77 @@ class VADTranscriber:
                     beam_size=BEAM_SIZE,
                     condition_on_previous_text=True,
                 )
-                # If diarization is ready, assign speakers by overlap on absolute timeline
-                if diar_results["ready"] and diar_results["segments"]:
-                    for s in segs:
-                        try:
-                            if hasattr(s, 'start'):
-                                s.start = float(s.start) + (start_i / SAMPLE_RATE)
-                            if hasattr(s, 'end'):
-                                s.end = float(s.end) + (start_i / SAMPLE_RATE)
-                        except Exception:
-                            pass
-                    assign_speakers(segs, diar_results["segments"])
+
+                # Run diarization ON THIS CHUNK ONLY, using the pre-loaded pipeline
+                if diar_pipeline is not None:
+                    try:
+                        # Run diarization on this small chunk
+                        diar_segments = diarize_audio_data(chunk, SAMPLE_RATE, pipeline=diar_pipeline)
+                        # Assign speakers to the segments from this chunk
+                        assign_speakers(segs, diar_segments)
+                    except Exception as e:
+                        logger.debug(f"Chunk-level diarization failed for chunk {idx}: {e}")
+
+                # Output the results
+                for s in segs:
+                    text = s.text.strip()
+                    if not text:
+                        continue
+                    spk = getattr(s, 'speaker', None)
+                    if spk:
+                        logger.info(f"[Stream][{idx}][{spk}] {text}")
+                    else:
+                        logger.info(f"[Stream][{idx}] {text}")
+
+        except Exception as e:
+            logger.exception(f"Streaming file processing error: {e}")
+        """Stream-like processing of a file: VAD-segment, transcribe immediately.
+        Diarization runs on EACH CHUNK individually for immediate speaker labeling.
+        """
+        try:
+            logger.info(f"Processing (streaming) file: {file_path}")
+            audio = load_audio_file(file_path, SAMPLE_RATE)
+
+            # VAD segmentation for the entire file
+            timestamps = run_vad(
+                audio,
+                self.vad_model,
+                self.get_speech_timestamps,
+                sample_rate=SAMPLE_RATE,
+                threshold=VAD_THRESHOLD,
+                min_speech_ms=VAD_MIN_SPEECH_MS,
+                min_silence_ms=VAD_MIN_SILENCE_MS,
+                pad_ms=VAD_SPEECH_PAD_MS,
+            )
+            if not timestamps:
+                logger.info("No speech detected.")
+                return
+
+            max_frames = int(VAD_MAX_SPEECH_S * SAMPLE_RATE)
+            for idx, ts in enumerate(timestamps, start=1):
+                start_i, end_i = cap_ts_bounds(ts, max_frames)
+                if end_i - start_i < int(SAMPLE_RATE * 0.5):
+                    continue
+                chunk = audio[start_i:end_i]
+
+                # --- START OF MODIFICATION ---
+                # Transcribe the chunk
+                segs = transcribe_chunk(
+                    self.model,
+                    chunk,
+                    language="en",
+                    beam_size=BEAM_SIZE,
+                    condition_on_previous_text=True,
+                )
+
+                # Run diarization ON THIS CHUNK ONLY
+                try:
+                    diar_segments = diarize_audio_data(chunk, SAMPLE_RATE)
+                    assign_speakers(segs, diar_segments)
+                except Exception as e:
+                    logger.debug(f"Chunk-level diarization failed for chunk {idx}: {e}")
+                    pass
+                # --- END OF MODIFICATION ---
 
                 for s in segs:
                     text = s.text.strip()
@@ -249,12 +322,6 @@ class VADTranscriber:
                         logger.info(f"[Stream][{idx}][{spk}] {text}")
                     else:
                         logger.info(f"[Stream][{idx}] {text}")
-            # Ensure background diarization (if any) finishes before exiting to avoid C++ aborts
-            try:
-                if diar_thread.is_alive():
-                    logger.info("Waiting for diarization to finish...")
-                    diar_thread.join()
-            except Exception:
-                pass
+
         except Exception as e:
             logger.exception(f"Streaming file processing error: {e}")
