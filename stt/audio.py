@@ -33,3 +33,13 @@ def load_audio_file(file_path: str, target_sr: int) -> np.ndarray:
     return wav.detach().cpu().to(torch.float32).numpy()
 
 
+def rms_normalize(audio: np.ndarray, target_rms: float) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+    rms = float(np.sqrt(np.mean(np.square(audio))))
+    if rms <= 1e-8:
+        return audio
+    gain = target_rms / rms
+    return np.clip(audio * gain, -1.0, 1.0)
+
+

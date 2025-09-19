@@ -10,6 +10,11 @@ CHANNELS = int(os.getenv("CHANNELS", "1"))
 BLOCK_SECONDS = float(os.getenv("BLOCK_SECONDS", os.getenv("BLOCK_SECS", "1.5")))
 FRAMES_PER_BLOCK = int(SAMPLE_RATE * BLOCK_SECONDS)
 INPUT_DEVICE = os.getenv("INPUT_DEVICE", "")
+OVERLAP_MS = int(os.getenv("OVERLAP_MS", "150"))  # overlap around VAD segments in streaming
+NORMALIZE_AUDIO = os.getenv("NORMALIZE_AUDIO", "1") in {"1", "true", "True"}
+TARGET_RMS = float(os.getenv("TARGET_RMS", "0.03"))  # ~-30 dBFS linear RMS
+ADAPTIVE_VAD = os.getenv("ADAPTIVE_VAD", "0") in {"1", "true", "True"}
+OUTPUT_JSONL = os.getenv("OUTPUT_JSONL", "")  # path to write JSONL transcripts
 
 # VAD
 VAD_THRESHOLD = float(os.getenv("VAD_THRESHOLD", "0.6"))

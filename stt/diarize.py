@@ -119,3 +119,20 @@ def assign_speakers(whisper_segments, diar_segments: List[Dict[str, Any]]):
             except Exception:
                 pass
     return whisper_segments
+
+
+class SpeakerIdMapper:
+    """Stable mapping of diarization labels to SPEAKER_01.. per session."""
+    def __init__(self):
+        self._map: Dict[str, str] = {}
+        self._next = 1
+
+    def map(self, label: Optional[str]) -> Optional[str]:
+        if not label:
+            return None
+        if label in self._map:
+            return self._map[label]
+        pretty = f"SPEAKER_{self._next:02d}"
+        self._map[label] = pretty
+        self._next += 1
+        return pretty
