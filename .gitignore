@@ -1,0 +1,36 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+venv/
+.env/
+.venv/
+
+build/
+dist/
+*.egg-info/
+.eggs/
+
+.cache/
+*.log
+.ipynb_checkpoints/
+
+.vscode/
+.idea/
+*.swp
+
+.DS_Store
+*.btr
+
+# Audio/media samples
+*.wav
+*.mp3
+*.webm
+*.m4a
+
+models/
+
+# Project-specific
+.cursorignore
