@@ -34,6 +34,7 @@ def transcribe_chunk(
     language: str,
     beam_size: int,
     condition_on_previous_text: bool = True,
+    suppress_tokens = list,
 ):
     if chunk.size == 0:
         return []
@@ -43,6 +44,7 @@ def transcribe_chunk(
             language=language,
             beam_size=beam_size,
             condition_on_previous_text=condition_on_previous_text,
+            suppress_tokens = None
         )
     return segments
 

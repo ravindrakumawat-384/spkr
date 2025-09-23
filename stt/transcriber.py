@@ -96,7 +96,7 @@ class VADTranscriber:
 
     def run(self):
         self.start_recording()
-
+        # print("start recording..")
         try:
             while not self._stop_event.is_set():
                 try:
@@ -124,8 +124,7 @@ class VADTranscriber:
                     continue
 
                 max_frames = int(VAD_MAX_SPEECH_S * SAMPLE_RATE)
-
-                logger.info(f"Detected {len(speech_timestamps)} speech region(s)")
+                # logger.info(f"Detected {len(speech_timestamps)} speech region(s)")
                 for idx, ts in enumerate(speech_timestamps, start=1):
                     start_i, end_i = cap_ts_bounds(ts, max_frames)
                     # apply small overlap padding
@@ -138,6 +137,11 @@ class VADTranscriber:
 
                     chunk = audio[start_i:end_i]
                     logger.debug(f"Region {idx} frames [{start_i}:{end_i}] -> {chunk.shape[0]} frames")
+                    
+                    if len(chunk) < SAMPLE_RATE * 1.5:  # <1.5s
+                        logger.debug("Skipping very short chunk, too small for reliable transcription.")
+                        continue
+
 
                     # Transcribe the chunk
                     segs = transcribe_chunk(
@@ -145,30 +149,83 @@ class VADTranscriber:
                         chunk,
                         language="en",
                         beam_size=BEAM_SIZE,
-                        condition_on_previous_text=True,
+                        condition_on_previous_text=False,
+                        suppress_tokens=[-1],
                     )
                     
                     # Apply speaker diarization if pipeline is available
-                    if self.diar_pipeline is not None:
-                        try:
-                            diar_segments = diarize_audio_data(chunk, SAMPLE_RATE, pipeline=self.diar_pipeline)
-                            assign_speakers(segs, diar_segments)
-                        except Exception as e:
-                            logger.debug(f"Real-time diarization failed for chunk {idx}: {e}")
+                    # if self.diar_pipeline is not None:
+                    #     try:
+                    #         diar_segments = diarize_audio_data(chunk, SAMPLE_RATE, pipeline=self.diar_pipeline)
+                    #         assign_speakers(segs, diar_segments)
+                    #     except Exception as e:
+                    #         logger.debug(f"Real-time diarization failed for chunk {idx}: {e}")
                     
                     # Output the results
+
+
+
+                    # update this part in transcribe
+                    # results = model.transcribe(
+                    #     audio_chunk,
+                    #     language=language,
+                    #     beam_size=beam_size,
+                    #     condition_on_previous_text=condition_on_previous_text,
+                    #     temperature=0.0,              # deterministic decoding
+                    #     no_speech_threshold=0.8,      # ✅ more strict silence detection
+                    #     logprob_threshold=-1.0,       # ✅ drop low-confidence words
+                    #     suppress_tokens=[-1],         # ✅ disable default "filler" tokens
+                    #     word_timestamps=True,
+                    # )
+
+            
                     for seg in segs:
-                        if getattr(seg, 'no_speech_prob', 0.0) > 0.6:
+                        # if getattr(seg, 'no_speech_prob', 0.0) > 0.6:
+                        if getattr(seg, 'no_speech_prob', 0.0) > 0.9:
                             continue
                         text = seg.text.strip()
+
                         if text:
+                            # print("text1: ", text)
                             spk = getattr(seg, 'speaker', None)
                             if spk:
+                                print("if spk")
                                 spk = self.speaker_mapper.map(spk)
                                 logger.info(f"📝 [{spk}]: {text}")
                             else:
-                                logger.info(f"📝 {text}")
+                                # print("text2: ", text)
+                                # filter stock hallucinations
+                                if text.lower() in {"thank you", "bye", "thank you very much", "thanks for watching"}:
+                                    print("text3", text)
+                                    logger.debug(f"Skipping likely hallucination: {text}")
+                                    logger.info(f"text--> {text}")
+                                    continue
+                                if len(text.split()) <= 2 and getattr(seg, 'avg_logprob', -1) < -0.5:
+                                    continue
 
+                                print("final text: ", text)
+
+                        if not text:
+                            print("text4: ", text)
+                            continue
+                    
+
+                    # for seg in results["segments"]:
+                    #     text = seg["text"].strip()
+                    #     avg_logprob = seg.get("avg_logprob", -99)
+
+                    #     # Skip empty/garbage or low-confidence segments
+                    #     if not text:
+                    #         continue
+                    #     if avg_logprob < -0.5:   # too uncertain → skip
+                    #         continue
+                    #     if text.lower() in {
+                    #         "thank you", "bye", "thanks for watching",
+                    #         "thank you so much", "thank you sir"
+                    #     }:
+                    #         continue
+
+                    
                 self.buffer = []
 
         except KeyboardInterrupt:
@@ -196,7 +253,7 @@ class VADTranscriber:
                     file_path,
                     language="en",
                     beam_size=BEAM_SIZE,
-                    condition_on_previous_text=True,
+                    condition_on_previous_text=False,
                 )
                 for s in segments:
                     segs.append(s)
@@ -271,7 +328,7 @@ class VADTranscriber:
                     chunk,
                     language="en",
                     beam_size=BEAM_SIZE,
-                    condition_on_previous_text=True,
+                    condition_on_previous_text=False,
                 )
 
                 # Run diarization ON THIS CHUNK ONLY, using the pre-loaded pipeline
